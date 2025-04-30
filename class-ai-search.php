@@ -20,13 +20,14 @@ class ThinkAny_WP_AI_Search {
         $this->model = isset($options['model']) ? $options['model'] : 'gpt-3.5-turbo';
         $this->cache_duration = isset($options['cache_duration']) ? intval($options['cache_duration']) : 6;
         
-        // Add filters for search enhancement
-        add_filter('posts_search', array($this, 'enhance_search_query'), 999, 2);
-        add_filter('posts_where', array($this, 'modify_search_where'), 999, 2);
-        add_filter('posts_request', array($this, 'modify_search_request'), 10, 2);
-        //add_filter('posts_clauses', array($this, 'modify_search_relevance'), 10, 2);
-        //add_filter('posts_orderby', array($this, 'modify_search_orderby'), 10, 2);
-        add_filter('the_posts', array($this, 'debug_search_results'), 10, 2);
+        // Only add search filters on the frontend, not in admin
+        if (!is_admin()) {
+            // Add filters for search enhancement
+            add_filter('posts_search', array($this, 'enhance_search_query'), 999, 2);
+            add_filter('posts_where', array($this, 'modify_search_where'), 999, 2);
+            add_filter('posts_request', array($this, 'modify_search_request'), 10, 2);
+            add_filter('the_posts', array($this, 'debug_search_results'), 10, 2);
+        }
     }
 
     public static function get_instance() {
@@ -40,6 +41,11 @@ class ThinkAny_WP_AI_Search {
      * Enhance search query with AI assistance
      */
     public function enhance_search_query($search, $query) {
+        // Skip if in admin
+        if (is_admin()) {
+            return $search;
+        }
+        
         // Get settings
         $options = get_option('thinkany_wp_ai_search_settings');
         $enabled = isset($options['enabled']) ? (bool)$options['enabled'] : false;
@@ -61,10 +67,16 @@ class ThinkAny_WP_AI_Search {
     public function modify_search_where($where, $query) {
         global $wpdb;
         
+        // Skip if in admin
+        if (is_admin()) {
+            return $where;
+        }
+        
         // Get settings
         $options = get_option('thinkany_wp_ai_search_settings');
         $enabled = isset($options['enabled']) ? (bool)$options['enabled'] : false;
         $debug = isset($options['debug']) ? (bool)$options['debug'] : false;
+        $token_info_logging = isset($options['token_info_logging']) ? (bool)$options['token_info_logging'] : false;
         
         // Only modify search on main query
         if (!is_search() || !$query->is_main_query() || !$enabled) {
@@ -90,6 +102,10 @@ class ThinkAny_WP_AI_Search {
                 error_log('ThinkAny WP AI Search: Enhanced terms for WHERE: ' . implode(', ', $enhanced_terms));
             }
         } else {
+            // No API key available, log warning and use only the original search term
+            if ($token_info_logging || $debug) {
+                error_log('ThinkAny WP AI Search: No API key available. Using only original search term.');
+            }
             $enhanced_terms = array($search_term);
         }
         
@@ -145,151 +161,21 @@ class ThinkAny_WP_AI_Search {
     }
 
     /**
-     * Get AI-enhanced search terms using OpenAI
-     */
-    private function get_ai_enhanced_terms($search_term) {
-        $cache_key = 'thinkany_wp_ai_search_' . md5($search_term);
-        $cached_result = get_transient($cache_key);
-
-        if (false !== $cached_result) {
-            error_log('ThinkAny WP AI Search: Using cached results for query: ' . $search_term);
-            return $cached_result;
-        }
-
-        error_log('ThinkAny WP AI Search: Making API request for query: ' . $search_term);
-        
-        try {
-            $request_body = array(
-                'model' => $this->model,
-                'messages' => array(
-                    array(
-                        'role' => 'system',
-                        'content' => 'You are a search enhancement assistant. Given a search query, return 3-5 related search terms that would help find relevant content. Return only the terms separated by commas, no other text.'
-                    ),
-                    array(
-                        'role' => 'user',
-                        'content' => $search_term
-                    )
-                ),
-                'temperature' => 0.3,
-                'max_tokens' => 100
-            );
-            
-            error_log('ThinkAny WP AI Search: Request body: ' . json_encode($request_body));
-            
-            $response = wp_remote_post('https://api.openai.com/v1/chat/completions',array(
-                'headers' => array(
-                    'Authorization' => 'Bearer ' . $this->api_key,
-                    'Content-Type' => 'application/json',
-                ),
-                'body' => json_encode($request_body)
-            ));
-
-            if (is_wp_error($response)) {
-                error_log('ThinkAny WP AI Search Error: ' . $response->get_error_message());
-                return array($search_term);
-            }
-
-            $response_code = wp_remote_retrieve_response_code($response);
-            $response_body = wp_remote_retrieve_body($response);
-            
-            error_log('ThinkAny WP AI Search: Response code: ' . $response_code);
-            error_log('ThinkAny WP AI Search: Response body: ' . $response_body);
-            
-            if ($response_code !== 200) {
-                error_log('ThinkAny WP AI Search Error: API returned status ' . $response_code . '. Response: ' . $response_body);
-                return array($search_term);
-            }
-
-            $body = json_decode($response_body, true);
-            
-            if (empty($body['choices'][0]['message']['content'])) {
-                error_log('ThinkAny WP AI Search Error: Empty response from OpenAI. Full response: ' . $response_body);
-                return array($search_term);
-            }
-
-            $enhanced_terms = array_map('trim', explode(',', $body['choices'][0]['message']['content']));
-            $enhanced_terms[] = $search_term;
-            
-            error_log('ThinkAny WP AI Search: Enhanced terms: ' . implode(', ', $enhanced_terms));
-            
-            // Cache for specified duration
-            set_transient($cache_key, $enhanced_terms, $this->cache_duration * HOUR_IN_SECONDS);
-
-            if (isset($options['debug']) && $options['debug']) {
-                error_log('ThinkAny WP AI Search: Enhanced terms before returning: ' . implode(', ', $enhanced_terms));
-            }
-            
-            return $enhanced_terms;
-
-        } catch (Exception $e) {
-            error_log('ThinkAny WP AI Search Error: ' . $e->getMessage());
-            return array($search_term);
-        }
-    }
-
-    /**
-     * Build enhanced MySQL search query
-     */
-    private function build_enhanced_search_query($terms, $wpdb, $original_term = '') {
-        $options = get_option('thinkany_wp_ai_search_settings');
-        $debug = isset($options['debug']) ? (bool)$options['debug'] : false;
-        
-        if ($debug) {
-            error_log('ThinkAny WP AI Search: Building query with terms: ' . implode(', ', $terms));
-        }
-        
-        // If we have an original term, make sure it's the first one in the array for relevance
-        if (!empty($original_term)) {
-            // Remove the original term if it exists in the array to avoid duplication
-            $terms = array_filter($terms, function($term) use ($original_term) {
-                return strtolower(trim($term)) !== strtolower(trim($original_term));
-            });
-            
-            // Add the original term at the beginning of the array
-            array_unshift($terms, $original_term);
-            
-            if ($debug) {
-                error_log('ThinkAny WP AI Search: Reordered terms with original first: ' . implode(', ', $terms));
-            }
-        }
-        
-        $search_conditions = array();
-        
-        foreach ($terms as $term) {
-            $term = trim($term);
-            if (empty($term)) continue;
-            
-            // Direct approach without using wpdb->prepare for LIKE statements
-            $escaped_term = $wpdb->esc_like($term);
-            $search_conditions[] = "({$wpdb->posts}.post_title LIKE '%{$escaped_term}%' OR {$wpdb->posts}.post_content LIKE '%{$escaped_term}%' OR {$wpdb->posts}.post_excerpt LIKE '%{$escaped_term}%')";
-        }
-        
-        if (!empty($search_conditions)) {
-            // Use OR between all conditions to include results from any term
-            $search_sql = " AND (" . implode(" OR ", $search_conditions) . ")";
-            
-            if ($debug) {
-                error_log('ThinkAny WP AI Search: Built enhanced query with ' . count($terms) . ' terms');
-                error_log('ThinkAny WP AI Search: SQL: ' . $search_sql);
-            }
-            
-            return $search_sql;
-        }
-        
-        return '';
-    }
-
-    /**
      * Modify the entire search request SQL query
      */
     public function modify_search_request($sql, $query) {
         global $wpdb;
         
+        // Skip if in admin
+        if (is_admin()) {
+            return $sql;
+        }
+        
         // Get settings
         $options = get_option('thinkany_wp_ai_search_settings');
         $enabled = isset($options['enabled']) ? (bool)$options['enabled'] : false;
         $debug = isset($options['debug']) ? (bool)$options['debug'] : false;
+        $token_info_logging = isset($options['token_info_logging']) ? (bool)$options['token_info_logging'] : false;
         
         // Only modify search on main query
         if (!is_search() || !$query->is_main_query() || !$enabled) {
@@ -311,10 +197,14 @@ class ThinkAny_WP_AI_Search {
                 $enhanced_terms[] = $search_term;
             }
             
-            if ($debug) {
+            if ($token_info_logging) {
                 error_log('ThinkAny WP AI Search: Using cached results for query: ' . $search_term);
             }
         } else {
+            // No API key available, log warning and use only the original search term
+            if ($token_info_logging || $debug) {
+                error_log('ThinkAny WP AI Search: No API key available. Using only original search term.');
+            }
             $enhanced_terms = array($search_term);
         }
         
@@ -455,6 +345,11 @@ class ThinkAny_WP_AI_Search {
      * Add a debugging method to check if the plugin is actually expanding search results
      */
     public function debug_search_results($posts, $query) {
+        // Skip if in admin
+        if (is_admin()) {
+            return $posts;
+        }
+        
         if (!is_search() || !$query->is_main_query()) {
             return $posts;
         }
@@ -463,17 +358,20 @@ class ThinkAny_WP_AI_Search {
         $options = get_option('thinkany_wp_ai_search_settings');
         $enabled = isset($options['enabled']) ? (bool)$options['enabled'] : false;
         $debug = isset($options['debug']) ? (bool)$options['debug'] : false;
+        $token_info_logging = isset($options['token_info_logging']) ? (bool)$options['token_info_logging'] : false;
         
-        if (!$enabled || !$debug) {
+        if (!$enabled || (!$debug && !$token_info_logging)) {
             return $posts;
         }
         
         // Log the number of search results
         $count = count($posts);
-        error_log('ThinkAny WP AI Search: Found ' . $count . ' search results for query: ' . get_search_query());
+        if ($debug) {
+            error_log('ThinkAny WP AI Search: Found ' . $count . ' search results for query: ' . get_search_query());
+        }
         
         // Log the titles of the search results
-        if ($count > 0) {
+        if ($count > 0 && $debug) {
             $titles = array();
             foreach ($posts as $post) {
                 $titles[] = $post->post_title;
@@ -482,5 +380,197 @@ class ThinkAny_WP_AI_Search {
         }
         
         return $posts;
+    }
+
+    /**
+     * Get AI-enhanced search terms using OpenAI
+     */
+    private function get_ai_enhanced_terms($search_term) {
+        // Get settings
+        $options = get_option('thinkany_wp_ai_search_settings');
+        $debug = isset($options['debug']) ? (bool)$options['debug'] : false;
+        $token_info_logging = isset($options['token_info_logging']) ? (bool)$options['token_info_logging'] : false;
+        
+        $cache_key = 'thinkany_wp_ai_search_' . md5($search_term);
+        $cached_result = get_transient($cache_key);
+
+        if (false !== $cached_result) {
+            if ($token_info_logging) {
+                error_log('ThinkAny WP AI Search: Using cached results for query: ' . $search_term);
+            }
+            return $cached_result;
+        }
+
+        // Check if API key is available
+        if (empty($this->api_key)) {
+            if ($token_info_logging || $debug) {
+                error_log('ThinkAny WP AI Search: No API key available. Cannot enhance search.');
+            }
+            return array($search_term);
+        }
+
+        if ($token_info_logging) {
+            error_log('ThinkAny WP AI Search: Making API request for query: ' . $search_term);
+        }
+        
+        try {
+            $request_body = array(
+                'model' => $this->model,
+                'messages' => array(
+                    array(
+                        'role' => 'system',
+                        'content' => 'You are a search enhancement assistant. Given a search query, return 3-5 related search terms that would help find relevant content. Return only the terms separated by commas, no other text.'
+                    ),
+                    array(
+                        'role' => 'user',
+                        'content' => $search_term
+                    )
+                ),
+                'temperature' => 0.3,
+                'max_tokens' => 100
+            );
+            
+            if ($token_info_logging) {
+                error_log('ThinkAny WP AI Search: Request body: ' . json_encode($request_body));
+            }
+            
+            $response = wp_remote_post('https://api.openai.com/v1/chat/completions',array(
+                'headers' => array(
+                    'Authorization' => 'Bearer ' . $this->api_key,
+                    'Content-Type' => 'application/json',
+                ),
+                'body' => json_encode($request_body)
+            ));
+
+            if (is_wp_error($response)) {
+                if ($token_info_logging || $debug) {
+                    error_log('ThinkAny WP AI Search Error: ' . $response->get_error_message());
+                }
+                return array($search_term);
+            }
+
+            $response_code = wp_remote_retrieve_response_code($response);
+            $response_body = wp_remote_retrieve_body($response);
+            
+            if ($token_info_logging) {
+                error_log('ThinkAny WP AI Search: Response code: ' . $response_code);
+                error_log('ThinkAny WP AI Search: Response body: ' . $response_body);
+            }
+            
+            if ($response_code !== 200) {
+                if ($token_info_logging || $debug) {
+                    error_log('ThinkAny WP AI Search Error: API returned status ' . $response_code . '. Response: ' . $response_body);
+                }
+                return array($search_term);
+            }
+
+            $response_data = json_decode($response_body, true);
+            
+            // Check if we have a valid response
+            if (isset($response_data['choices'][0]['message']['content'])) {
+                $content = $response_data['choices'][0]['message']['content'];
+                
+                // Parse the comma-separated terms
+                $terms = array_map('trim', explode(',', $content));
+                
+                // Filter out empty terms
+                $terms = array_filter($terms, function($term) {
+                    return !empty($term);
+                });
+                
+                // Add the original search term if not already included
+                if (!in_array($search_term, $terms)) {
+                    $terms[] = $search_term;
+                }
+                
+                // Cache the result
+                set_transient($cache_key, $terms, $this->cache_duration * HOUR_IN_SECONDS);
+                
+                // Track API usage
+                if (isset($response_data['usage'])) {
+                    thinkany_wp_ai_search_track_api_call($response_data['usage']);
+                    
+                    if ($token_info_logging) {
+                        error_log('ThinkAny WP AI Search: Token usage - ' . 
+                            'Prompt: ' . $response_data['usage']['prompt_tokens'] . ', ' .
+                            'Completion: ' . $response_data['usage']['completion_tokens'] . ', ' .
+                            'Total: ' . $response_data['usage']['total_tokens']);
+                    }
+                }
+                
+                if ($debug) {
+                    error_log('ThinkAny WP AI Search: Enhanced terms: ' . implode(', ', $terms));
+                }
+                
+                return $terms;
+            } else {
+                if ($token_info_logging || $debug) {
+                    error_log('ThinkAny WP AI Search: Invalid response from OpenAI API: ' . $response_body);
+                }
+                return array($search_term);
+            }
+        } catch (Exception $e) {
+            if ($token_info_logging || $debug) {
+                error_log('ThinkAny WP AI Search: Error calling OpenAI API: ' . $e->getMessage());
+            }
+            return array($search_term);
+        }
+    }
+
+    /**
+     * Build enhanced MySQL search query
+     */
+    private function build_enhanced_search_query($terms, $wpdb, $original_term = '') {
+        // Get settings
+        $options = get_option('thinkany_wp_ai_search_settings');
+        $debug = isset($options['debug']) ? (bool)$options['debug'] : false;
+        $token_info_logging = isset($options['token_info_logging']) ? (bool)$options['token_info_logging'] : false;
+        
+        if (empty($terms) || !is_array($terms)) {
+            return '';
+        }
+        
+        if ($token_info_logging || $debug) {
+            error_log('ThinkAny WP AI Search: Building query with terms: ' . implode(', ', $terms));
+        }
+        
+        // If original term is provided, make sure it's first in the list
+        if (!empty($original_term)) {
+            // Remove the original term if it exists in the array
+            $terms = array_filter($terms, function($term) use ($original_term) {
+                return $term !== $original_term;
+            });
+            
+            // Add the original term at the beginning
+            array_unshift($terms, $original_term);
+            
+            if ($token_info_logging || $debug) {
+                error_log('ThinkAny WP AI Search: Reordered terms with original first: ' . implode(', ', $terms));
+            }
+        }
+        
+        $search_conditions = array();
+        
+        foreach ($terms as $term) {
+            $term = trim($term);
+            if (empty($term)) continue;
+            
+            $escaped_term = $wpdb->esc_like($term);
+            $search_conditions[] = "({$wpdb->posts}.post_title LIKE '%{$escaped_term}%' OR {$wpdb->posts}.post_content LIKE '%{$escaped_term}%' OR {$wpdb->posts}.post_excerpt LIKE '%{$escaped_term}%')";
+        }
+        
+        if (!empty($search_conditions)) {
+            // Use OR between all conditions to include results from any term
+            $search_sql = '(' . implode(' OR ', $search_conditions) . ')';
+            
+            if ($token_info_logging || $debug) {
+                error_log('ThinkAny WP AI Search: Built enhanced query with ' . count($terms) . ' terms');
+                error_log('ThinkAny WP AI Search: SQL: ' . $search_sql);
+            }
+            
+            return $search_sql;
+        }
+        
+        return '';
     }
 }
