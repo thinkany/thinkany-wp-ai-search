@@ -86,7 +86,7 @@ No, the plugin only enhances frontend searches. Admin searches remain untouched 
 == Changelog ==
 
 = 1.0.1 =
-* Added Token Info Logging option to separately track API usage
+* Added a Token Info Logging option to separately track API usage
 * Improved admin interface with toggle switches for settings
 * Added safeguard to prevent the plugin from affecting admin searches
 
